@@ -1,62 +1,76 @@
-# Load environment variables first
+# Load environment variables FIRST (local dev only)
 import dotenv
-dotenv.load_dotenv()  # Must be at the top before using os.getenv
+dotenv.load_dotenv()
 
 import os
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone
 from groq import Groq
-import fitz
-from textwrap import wrap
 from supabase import create_client
 
-# Import your blueprint after loading env
+# Import blueprint
 from routes.legal_professionals import legal_professionals_bp
 
+# -----------------------
 # Logging
-logging.basicConfig(level=logging.DEBUG)
+# -----------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask app
+# -----------------------
+# Flask App
+# -----------------------
 app = Flask(__name__)
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:5173", "https://law-pal.vercel.app"],
+        "origins": [
+            "http://localhost:5173",
+            "https://law-pal.vercel.app"
+        ],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-User-ID"],
     }
 })
 
-# Register blueprints
 app.register_blueprint(legal_professionals_bp)
 
-# Supabase client
+# -----------------------
+# Supabase
+# -----------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Missing Supabase URL or Service Key")
+    raise RuntimeError("Supabase credentials missing")
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# -----------------------
 # Pinecone
+# -----------------------
 PINECONE_API_KEY = os.getenv("PINECONE_API")
-PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
+PINECONE_INDEX = "lawpal"
+
 if not PINECONE_API_KEY:
-    raise ValueError("Missing Pinecone API Key")
+    raise RuntimeError("Pinecone API key missing")
+
 pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(PINECONE_INDEX)
 
-# Embedding model
-model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-
-# Groq client
+# -----------------------
+# Groq
+# -----------------------
 GROQ_API_KEY = os.getenv("GROQ_API")
 if not GROQ_API_KEY:
-    raise ValueError("Missing Groq API Key")
+    raise RuntimeError("Groq API key missing")
+
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Conversation history
+# -----------------------
+# In-memory conversation history
+# -----------------------
 conversation_histories = {
     "personal-and-family-legal-assistance": {},
     "business-consumer-and-criminal-legal-assistance": {},
@@ -64,88 +78,112 @@ conversation_histories = {
 }
 
 # -----------------------
-# Form submission route
+# Health check (IMPORTANT)
+# -----------------------
+@app.route("/")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+# -----------------------
+# Submit Form
 # -----------------------
 @app.route("/submit-form", methods=["POST"])
 def submit_form():
     try:
-        if not request.is_json:
-            return jsonify({"error": "Request must be JSON"}), 400
-
-        data = request.get_json()
+        data = request.get_json(force=True)
         required = ["firstName", "lastName", "email", "subject", "message"]
+
         if not all(data.get(f) for f in required):
             return jsonify({"error": "Missing fields"}), 400
 
-        response = supabase.table("user_forms").insert(data).execute()
-        if response.data:
-            return jsonify({"message": "Form submitted successfully"}), 201
-        else:
-            return jsonify({"error": str(response.error)}), 500
+        result = supabase.table("user_forms").insert(data).execute()
+
+        if result.data:
+            return jsonify({"message": "Form submitted"}), 201
+
+        return jsonify({"error": "Insert failed"}), 500
 
     except Exception as e:
-        logger.exception("Submit form failed")
+        logger.exception("Form submission failed")
         return jsonify({"error": str(e)}), 500
 
 # -----------------------
-# Helper functions
+# Retrieve Context (Pinecone text search)
 # -----------------------
-def retrieve_context(index_name, query, top_k=3):
+def retrieve_context(query, top_k=3):
     try:
-        index = pc.Index(index_name)
-        embedding = model.encode(query).tolist()
-        results = index.query(vector=embedding, top_k=top_k, include_metadata=True)
-        return [m["metadata"]["text"] for m in results["matches"]]
+        results = index.query(
+            top_k=top_k,
+            include_metadata=True,
+            query={"text": query}
+        )
+
+        logger.info(f"Pinecone matches: {len(results.get('matches', []))}")
+
+        return [
+            m["metadata"].get("text", "")
+            for m in results.get("matches", [])
+        ]
+
     except Exception as e:
-        print("Pinecone error:", e)
+        logger.error(f"Pinecone error: {e}")
         return []
 
-def generate_response(query, contexts, history, service):
-    context = "\n\n".join(contexts) if contexts else "No context found"
+# -----------------------
+# Generate Answer
+# -----------------------
+def generate_response(query, contexts, service):
+    context_block = "\n\n".join(contexts) if contexts else "No legal context found."
+
     prompt = f"""
-Indian {service.replace('-', ' ').title()} Law Assistant.
+You are an Indian {service.replace('-', ' ')} law assistant.
+
+Use ONLY the context below.
+If unsure, say you are not certain.
 
 Context:
-{context}
+{context_block}
 
 Question:
 {query}
 
 Answer:
 """
-    try:
-        res = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=700,
-        )
-        return res.choices[0].message.content.strip()
-    except Exception as e:
-        return str(e)
 
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        max_tokens=600,
+    )
+
+    return response.choices[0].message.content.strip()
+
+# -----------------------
+# Chat Handler
+# -----------------------
 def handle_chat(service):
     if service not in conversation_histories:
-        return jsonify({"error": "Invalid service category"}), 400
+        return jsonify({"error": "Invalid service"}), 400
 
-    data = request.get_json()
+    data = request.get_json(force=True)
     query = data.get("query")
     user_id = request.headers.get("X-User-ID", "default")
 
     if not query:
         return jsonify({"error": "Query missing"}), 400
 
+    contexts = retrieve_context(query)
+    answer = generate_response(query, contexts, service)
+
     history = conversation_histories[service].setdefault(user_id, [])
-    contexts = retrieve_context("lawpal", query)
-    response = generate_response(query, contexts, history, service)
-
     history.append({"role": "user", "content": query})
-    history.append({"role": "bot", "content": response})
+    history.append({"role": "assistant", "content": answer})
 
-    return jsonify({"response": response})
+    return jsonify({"response": answer})
 
 # -----------------------
-# Chat routes
+# Routes
 # -----------------------
 @app.route("/<service>/chat", methods=["POST", "OPTIONS"])
 def chat(service):
@@ -155,13 +193,14 @@ def chat(service):
 
 @app.route("/<service>/history", methods=["GET"])
 def history(service):
-    if service not in conversation_histories:
-        return jsonify({"error": "Invalid service"}), 400
     user_id = request.headers.get("X-User-ID", "default")
-    return jsonify({"history": conversation_histories[service].get(user_id, [])})
+    return jsonify({
+        "history": conversation_histories.get(service, {}).get(user_id, [])
+    })
 
 # -----------------------
-# Run server
+# Run (Render-compatible)
 # -----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
