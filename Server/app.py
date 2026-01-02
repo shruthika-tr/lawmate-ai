@@ -23,17 +23,24 @@ logger = logging.getLogger(__name__)
 # Flask App
 # -----------------------
 app = Flask(__name__)
+
+# -----------------------
+# CORS Configuration
+# -----------------------
 CORS(app, resources={
     r"/*": {
         "origins": [
-            "http://localhost:5173",
-            "https://law-pal.vercel.app"
+            "http://localhost:5173",                  # Local development
+            "https://lawmate-ai-pi.vercel.app"       # Deployed frontend
         ],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-User-ID"],
     }
 })
 
+# -----------------------
+# Register Blueprints
+# -----------------------
 app.register_blueprint(legal_professionals_bp)
 
 # -----------------------
@@ -78,7 +85,7 @@ conversation_histories = {
 }
 
 # -----------------------
-# Health check (IMPORTANT)
+# Health check
 # -----------------------
 @app.route("/")
 def health():
@@ -108,7 +115,7 @@ def submit_form():
         return jsonify({"error": str(e)}), 500
 
 # -----------------------
-# Retrieve Context (Pinecone text search)
+# Retrieve Context
 # -----------------------
 def retrieve_context(query, top_k=3):
     try:
@@ -117,24 +124,17 @@ def retrieve_context(query, top_k=3):
             include_metadata=True,
             query={"text": query}
         )
-
         logger.info(f"Pinecone matches: {len(results.get('matches', []))}")
-
-        return [
-            m["metadata"].get("text", "")
-            for m in results.get("matches", [])
-        ]
-
+        return [m["metadata"].get("text", "") for m in results.get("matches", [])]
     except Exception as e:
         logger.error(f"Pinecone error: {e}")
         return []
 
 # -----------------------
-# Generate Answer
+# Generate Response
 # -----------------------
 def generate_response(query, contexts, service):
     context_block = "\n\n".join(contexts) if contexts else "No legal context found."
-
     prompt = f"""
 You are an Indian {service.replace('-', ' ')} law assistant.
 
@@ -149,14 +149,12 @@ Question:
 
 Answer:
 """
-
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.4,
         max_tokens=600,
     )
-
     return response.choices[0].message.content.strip()
 
 # -----------------------
@@ -194,13 +192,10 @@ def chat(service):
 @app.route("/<service>/history", methods=["GET"])
 def history(service):
     user_id = request.headers.get("X-User-ID", "default")
-    return jsonify({
-        "history": conversation_histories.get(service, {}).get(user_id, [])
-    })
+    return jsonify({"history": conversation_histories.get(service, {}).get(user_id, [])})
 
 # -----------------------
 # Run (Render-compatible)
 # -----------------------
-##if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+port = int(os.environ.get("PORT", 5000))
+app.run(host="0.0.0.0", port=port)
