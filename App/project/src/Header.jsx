@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { FiMenu, FiX } from "react-icons/fi";
-import { supabase } from "./supabase";
+import supabase from "./supabase.js";
 
 export const Header = ({ user }) => {
   const apiUrl = import.meta.env.VITE_API_URL;

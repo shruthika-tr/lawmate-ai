@@ -10,7 +10,7 @@ import Signup from "./SignUp";
 import ContactUs from "./ContactUs";
 import AboutUs from "./AboutUs";
 import Resources from "./Resources";
-import { supabase } from "./supabase";
+import supabase from "./supabase.js";
 import { I18nextProvider } from "react-i18next";
 import i18n from "./i18n";
 
